@@ -13,8 +13,7 @@ export async function POST(req: NextRequest){
   const result = await openai.images.generate({
     model: 'gpt-image-1',
     prompt: full,
-    // ← 型に存在する安全サイズを使う（例：1024x1024）
-    size: '1024x1024',
+    size: '1024x1024',   // ← 型に存在する安全な値
     quality: 'high'
   });
 
