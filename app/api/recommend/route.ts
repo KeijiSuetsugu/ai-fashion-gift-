@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { openai } from '@/lib/openai';
 
+type Outfit = {
+  name: string;
+  vibe: string;
+  items: string[];
+  colors: string[];
+  accessories?: string[];
+  occasion: string;
+  price_range: string;
+  caption: string;
+  prompt: string;
+};
+type OutfitList = { outfits: Outfit[] };
+
 export async function POST(req: NextRequest) {
   try {
     if (!process.env.OPENAI_API_KEY) {
@@ -24,55 +37,46 @@ Budget: ${budget}
 Occasion: ${occasion}
 Notes: ${notes}
 
-Return 3 outfits only.
+[OUTPUT SCHEMA]
+{
+  "outfits": [
+    {
+      "name": "string",
+      "vibe": "string",
+      "items": ["string"],
+      "colors": ["string"],
+      "accessories": ["string"],
+      "occasion": "string",
+      "price_range": "string",
+      "caption": "string",
+      "prompt": "string"
+    }
+  ]
+}
+Only return the JSON object above (no prose).
 `.trim();
 
-    const resp = await openai.responses.create({
+    const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      input: [
-        { role: 'system', content: [{ type: 'text', text: systemText }] },
-        { role: 'user',   content: [{ type: 'text', text: userText }] },
+      messages: [
+        { role: 'system', content: systemText },
+        { role: 'user', content: userText },
       ],
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'OutfitList',
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              outfits: {
-                type: 'array',
-                minItems: 3,
-                maxItems: 3,
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    name: { type: 'string' },
-                    vibe: { type: 'string' },
-                    items: { type: 'array', items: { type: 'string' } },
-                    colors:{ type: 'array', items: { type: 'string' } },
-                    accessories:{ type: 'array', items: { type: 'string' } },
-                    occasion:{ type: 'string' },
-                    price_range:{ type: 'string' },
-                    caption:{ type: 'string' },
-                    prompt:{ type: 'string' }
-                  },
-                  required: ['name','vibe','items','colors','occasion','price_range','caption','prompt']
-                }
-              }
-            },
-            required: ['outfits']
-          },
-          strict: true
-        }
-      }
+      response_format: { type: 'json_object' },
+      temperature: 0.7,
     });
 
-    const jsonText = resp.output_text ?? '{}';
-    let data: any;
-    try { data = JSON.parse(jsonText); } catch { data = { outfits: [] }; }
+    const text = completion.choices[0]?.message?.content ?? '{}';
+
+    let data: OutfitList;
+    try {
+      data = JSON.parse(text) as OutfitList;
+    } catch {
+      data = { outfits: [] };
+    }
+
+    // 念のため最低限の検証
+    if (!Array.isArray(data.outfits)) data.outfits = [];
     return NextResponse.json(data);
   } catch (err: any) {
     return NextResponse.json({ error: err?.message ?? 'failed' }, { status: 500 });
