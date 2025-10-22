@@ -97,6 +97,9 @@ export default function Home() {
       }
 
       const data = await res.json();
+      // const data = await res.json(); の直後に追加
+if (data.warning) setErrorMsg(`AIの応答に問題があったためサンプルを表示しています。\n${data.warning}`);
+
       setOutfits(data.outfits || []);
       if (!data.outfits?.length) {
         setErrorMsg('AI応答が空でした。サンプルを表示しています。');
