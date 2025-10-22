@@ -2,18 +2,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { openai } from '@/lib/openai';
 
-// Edge だと env が拾えない環境があるため Node.js 実行を明示
 export const runtime = 'nodejs';
 
-// 失敗時に画面で読めるメッセージを返すためユーティリティ
-function errorJSON(message: string, detail?: any, status = 500) {
-  return NextResponse.json(
-    { error: message, detail: typeof detail === 'string' ? detail : JSON.stringify(detail ?? {}) },
-    { status }
-  );
-}
-
-// 最低限のスキーマ検証（壊れたJSONへの保険）
+// ---- helpers ----
 function sanitize(data: any) {
   const safe = { outfits: [] as any[] };
   if (data && Array.isArray(data.outfits)) {
@@ -34,38 +25,72 @@ function sanitize(data: any) {
   return safe;
 }
 
-// 最終手段：AIが落ちてもUXが続くよう、サンプルを生成
-function mockOutfits(input: {
-  style: string; colors: string; budget: string; occasion: string;
-}) {
+function mockOutfits(input: { style: string; colors: string; budget: string; occasion: string }) {
   const base = (name: string, vibe: string, items: string[], col: string[], occ: string, price: string) => ({
-    name, vibe, items, colors: col,
+    name,
+    vibe,
+    items,
+    colors: col,
     accessories: ['simple earrings', 'leather mini shoulder'],
-    occasion: occ, price_range: price,
+    occasion: occ,
+    price_range: price,
     caption: `Tried a ${vibe} look! #ootd #style #fashion`,
-    prompt: `full-body fashion model, studio backdrop, soft key light, natural pose; wearing ${items.join(', ')} in ${col.join(', ')}; ${vibe} style`
+    prompt: `full-body fashion model, studio backdrop, soft key light, natural pose; wearing ${items.join(
+      ', '
+    )} in ${col.join(', ')}; ${vibe} style`,
   });
   const c = input.colors || 'black, beige, white';
-  const cols = c.split(/[、,]/).map(s => s.trim()).filter(Boolean);
+  const cols = c.split(/[、,]/).map((s) => s.trim()).filter(Boolean);
   const occ = input.occasion || 'dinner';
   const price = input.budget || '¥10,000–¥20,000';
 
   return {
     outfits: [
-      base('Smart casual set', 'clean & modern',
-        ['tailored blazer', 'silk-like blouse', 'straight trousers', 'pointed-toe pumps'], cols.slice(0,3), occ, price),
-      base('Relaxed weekend', 'cozy chic',
-        ['knit cardigan', 'boat-neck tee', 'satin skirt', 'ballet flats'], cols.slice(0,3), occ, price),
-      base('Monotone mode', 'minimal mode',
-        ['boxy jacket', 'tucked top', 'tapered pants', 'chunky loafers'], cols.slice(0,3), occ, price),
-    ]
+      base('Smart casual set', 'clean & modern', ['tailored blazer', 'silk-like blouse', 'straight trousers', 'pumps'], cols.slice(0, 3), occ, price),
+      base('Relaxed weekend', 'cozy chic', ['knit cardigan', 'boat-neck tee', 'satin skirt', 'ballet flats'], cols.slice(0, 3), occ, price),
+      base('Monotone mode', 'minimal mode', ['boxy jacket', 'tucked top', 'tapered pants', 'chunky loafers'], cols.slice(0, 3), occ, price),
+    ],
   };
 }
 
+function extractJSON(text: string) {
+  const s = text.indexOf('{');
+  const e = text.lastIndexOf('}');
+  if (s >= 0 && e > s) return text.slice(s, e + 1);
+  return text;
+}
+
+async function chatJSON(messages: { role: 'system' | 'user'; content: string }[]) {
+  const models = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']; // 段階的フォールバック
+  let lastErr: any;
+  for (const model of models) {
+    try {
+      const c = await openai.chat.completions.create({
+        model,
+        messages,
+        response_format: { type: 'json_object' },
+        temperature: 0.6,
+        max_tokens: 900,
+      });
+      const text = c.choices[0]?.message?.content ?? '{}';
+      const parsed = JSON.parse(extractJSON(text));
+      return { parsed, modelUsed: model };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+// ---- API ----
 export async function POST(req: NextRequest) {
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return errorJSON('OPENAI_API_KEY is not set on Vercel → Project → Settings → Environment Variables.');
+      // 200でサンプルを返す（UIを止めない）
+      return NextResponse.json({
+        ...mockOutfits({ style: '', colors: '', budget: '', occasion: '' }),
+        warning: 'OPENAI_API_KEY is not set. Returned sample outfits.',
+      });
     }
 
     const { age, style, sizes, budget, colors, occasion, notes } = await req.json();
@@ -104,38 +129,27 @@ Notes: ${notes}
 Only return the JSON object above (no prose).
 `.trim();
 
-    // Chat Completions を使用（型の不一致を避ける & JSON固定）
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemText },
-        { role: 'user', content: userText },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.6,
-      max_tokens: 900,
-    });
-
-    const text = completion.choices?.[0]?.message?.content ?? '{}';
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // もし ```json … ``` に包まれていた場合の救済
-      const start = text.indexOf('{');
-      const end = text.lastIndexOf('}');
-      parsed = start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : { outfits: [] };
-    }
+    // OpenAI 呼び出し（失敗したら catch でサンプル）
+    const { parsed, modelUsed } = await chatJSON([
+      { role: 'system', content: systemText },
+      { role: 'user', content: userText },
+    ]);
 
     const safe = sanitize(parsed);
     if (!safe.outfits.length) {
-      // 返却が空ならサンプルで補完（UXを止めない）
-      return NextResponse.json(mockOutfits({ style, colors, budget, occasion }));
+      return NextResponse.json({
+        ...mockOutfits({ style, colors, budget, occasion }),
+        warning: 'AI returned empty. Showing sample outfits.',
+        modelUsed,
+      });
     }
     return NextResponse.json(safe);
   } catch (err: any) {
-    // APIエラーなどはクライアントで表示できるよう詳細を返す
-    return errorJSON('Failed to get recommendations from AI.', err?.message ?? err);
+    // どんな失敗でも 200 + サンプルで返す（フロントは失敗表示にならない）
+    const message = typeof err?.message === 'string' ? err.message : String(err);
+    return NextResponse.json({
+      ...mockOutfits({ style: '', colors: '', budget: '', occasion: '' }),
+      warning: `AI call failed. Showing sample outfits. Detail: ${message}`,
+    });
   }
 }
